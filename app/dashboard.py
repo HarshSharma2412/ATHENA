@@ -82,7 +82,7 @@ def _build_summary_payload(snapshot: CompanyFinancialSnapshot) -> dict[str, Any]
         ("StockholdersEquity", "TotalEquityGrossMinorityInterest"),
     )
     return {
-        "company_name": profile.get("company_name") or profile.get("ticker"),
+        "company_name": profile.get("company_name") or snapshot.ticker.upper(),
         "ticker": snapshot.ticker.upper(),
         "current_price": fast_info.get("current_price"),
         "market_cap": market_cap,

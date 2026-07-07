@@ -1,9 +1,16 @@
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 import streamlit as st
 
+from athena.utils.formatting import format_indian_grouping, NOT_AVAILABLE
 from athena.utils.statements import matching_column
+
+_CRORE = 10_000_000.0
+
+# Metrics that are per-share values and must NOT be converted to crores.
+_PER_SHARE_METRICS = {"EPS"}
 
 IMPORTANT_METRICS: dict[str, tuple[str, ...]] = {
     "Income Statement": ("Revenue", "EBIT", "PAT", "EPS"),
@@ -67,8 +74,30 @@ def render_financial_table(title: str, frame: pd.DataFrame) -> None:
         st.info("No important metrics are available for this statement.")
         return
 
+    # Convert raw rupee values to crores (skip per-share metrics like EPS)
+    for metric in display_frame.index:
+        if metric not in _PER_SHARE_METRICS:
+            display_frame.loc[metric] = display_frame.loc[metric] / _CRORE
+
+    def _fmt_cell(value: object, metric: str) -> str:
+        """Format a single cell: crore values get ₹…Cr, EPS stays plain."""
+        if value is None or (isinstance(value, float) and (np.isnan(value) or np.isinf(value))):
+            return NOT_AVAILABLE
+        try:
+            num = float(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return NOT_AVAILABLE
+        if metric in _PER_SHARE_METRICS:
+            return f"{num:,.2f}"
+        return f"\u20b9{format_indian_grouping(num, 2)} Cr"
+
+    styled = display_frame.copy().astype(object)
+    for metric in styled.index:
+        for col in styled.columns:
+            styled.at[metric, col] = _fmt_cell(display_frame.at[metric, col], metric)
+
     st.dataframe(
-        display_frame.style.format("{:,.2f}", na_rep="N/A"),
+        styled,
         use_container_width=True,
         hide_index=False,
     )

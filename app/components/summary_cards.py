@@ -5,18 +5,17 @@ from typing import Any
 
 import streamlit as st
 
-from athena.utils.formatting import (
-    NOT_AVAILABLE,
-    format_market_cap_crores,
-    format_percent,
-    format_price,
+from athena.utils.formatting import NOT_AVAILABLE, to_float
+from athena.utils.number_formatter import (
+    format_currency,
+    format_market_cap,
+    format_percentage,
     format_ratio,
-    to_float,
 )
 
 
 def _price_no_decimals(value: Any) -> str:
-    return format_price(value, decimals=0)
+    return format_currency(value, decimals=0)
 
 
 def _tone_for_value(label: str, raw_value: Any) -> str:
@@ -40,11 +39,11 @@ def render_summary_cards(summary: dict[str, Any]) -> None:
     cards: list[tuple[str, str, Any]] = [
         ("Company", _text(summary.get("company_name") or summary.get("ticker")), summary.get("company_name")),
         ("Ticker", _text(summary.get("ticker")), summary.get("ticker")),
-        ("Current Price", format_price(summary.get("current_price")), summary.get("current_price")),
-        ("Market Cap", format_market_cap_crores(summary.get("market_cap")), summary.get("market_cap")),
+        ("Current Price", format_currency(summary.get("current_price")), summary.get("current_price")),
+        ("Market Cap", format_market_cap(summary.get("market_cap")), summary.get("market_cap")),
         ("PE", format_ratio(summary.get("pe")), summary.get("pe")),
         ("PB", format_ratio(summary.get("pb")), summary.get("pb")),
-        ("Dividend Yield", format_percent(summary.get("dividend_yield")), summary.get("dividend_yield")),
+        ("Dividend Yield", format_percentage(summary.get("dividend_yield")), summary.get("dividend_yield")),
         ("52 Week High", _price_no_decimals(summary.get("fifty_two_week_high")), summary.get("fifty_two_week_high")),
         ("52 Week Low", _price_no_decimals(summary.get("fifty_two_week_low")), summary.get("fifty_two_week_low")),
     ]

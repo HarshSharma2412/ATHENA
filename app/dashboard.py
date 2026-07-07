@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from math import isfinite
 from typing import Any
 
 import pandas as pd
@@ -10,6 +9,8 @@ import streamlit as st
 
 from athena.engines.ratio_engine import FinancialData, RatioEngine
 from athena.services.financial_service import FinancialService
+from athena.utils.formatting import to_float
+from athena.utils.statements import build_yearly_trend, latest_metric, to_engine_frame
 
 from app.components.charts import render_price_history, render_yearly_trend
 from app.components.financial_tables import render_financial_table
@@ -33,7 +34,7 @@ class CompanyFinancialSnapshot:
     cash_flow: pd.DataFrame
 
 
-@st.cache_resource
+@st.cache_resource(show_spinner=False)
 def _build_services() -> tuple[FinancialService, RatioEngine, Any | None]:
     repository: Any | None = None
     try:
@@ -49,6 +50,7 @@ def _build_services() -> tuple[FinancialService, RatioEngine, Any | None]:
 
 @st.cache_data(show_spinner=False, ttl=900)
 def _load_company_snapshot(ticker: str) -> CompanyFinancialSnapshot:
+    """Download every statement for a ticker exactly once (cached per ticker)."""
     service, _, _ = _build_services()
     normalized_ticker = ticker.strip().upper()
     return CompanyFinancialSnapshot(
@@ -62,61 +64,10 @@ def _load_company_snapshot(ticker: str) -> CompanyFinancialSnapshot:
     )
 
 
-def _to_float(value: Any) -> float | None:
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return None
-    if not isfinite(number):
-        return None
-    return number
-
-
-def _normalize_label(label: str) -> str:
-    return "".join(character for character in str(label).casefold() if character.isalnum())
-
-
-def _matching_column(frame: pd.DataFrame, aliases: tuple[str, ...]) -> str | None:
-    normalized_aliases = {_normalize_label(alias) for alias in aliases}
-    for column in frame.columns:
-        if _normalize_label(str(column)) in normalized_aliases:
-            return str(column)
-    for column in frame.columns:
-        normalized_column = _normalize_label(str(column))
-        if any(alias in normalized_column for alias in normalized_aliases):
-            return str(column)
-    return None
-
-
-def _latest_metric(frame: pd.DataFrame, aliases: tuple[str, ...]) -> float | None:
-    column = _matching_column(frame, aliases)
-    if column is None:
-        return None
-
-    values = pd.to_numeric(frame[column], errors="coerce").dropna()
-    if values.empty:
-        return None
-    return _to_float(values.iloc[0])
-
-
-def _build_yearly_trend(frame: pd.DataFrame, aliases: tuple[str, ...]) -> pd.DataFrame:
-    column = _matching_column(frame, aliases)
-    if column is None or "metric" not in frame.columns:
-        return pd.DataFrame(columns=["year", "value"])
-
-    trend = pd.DataFrame(
-        {
-            "year": pd.to_datetime(frame["metric"], errors="coerce").dt.year,
-            "value": pd.to_numeric(frame[column], errors="coerce"),
-        }
-    )
-    return trend.dropna(subset=["year", "value"]).sort_values("year")
-
-
 def _safe_divide(numerator: Any, denominator: Any) -> float | None:
-    numerator_value = _to_float(numerator)
-    denominator_value = _to_float(denominator)
-    if numerator_value is None or denominator_value in (None, 0):
+    numerator_value = to_float(numerator)
+    denominator_value = to_float(denominator)
+    if numerator_value is None or denominator_value is None or denominator_value == 0:
         return None
     return numerator_value / denominator_value
 
@@ -125,8 +76,8 @@ def _build_summary_payload(snapshot: CompanyFinancialSnapshot) -> dict[str, Any]
     profile = snapshot.profile
     fast_info = snapshot.fast_info
     market_cap = profile.get("market_cap") or fast_info.get("market_cap")
-    net_income = _latest_metric(snapshot.income_statement, ("NetIncome", "Net Income"))
-    equity = _latest_metric(
+    net_income = latest_metric(snapshot.income_statement, ("NetIncome", "Net Income"))
+    equity = latest_metric(
         snapshot.balance_sheet,
         ("StockholdersEquity", "TotalEquityGrossMinorityInterest"),
     )
@@ -146,13 +97,15 @@ def _build_summary_payload(snapshot: CompanyFinancialSnapshot) -> dict[str, Any]
 def _build_ratio_payload(snapshot: CompanyFinancialSnapshot) -> dict[str, Any]:
     _, ratio_engine, _ = _build_services()
     data = FinancialData(
-        income_statement=snapshot.income_statement,
-        balance_sheet=snapshot.balance_sheet,
-        cash_flow=snapshot.cash_flow,
-        fast_info=snapshot.fast_info,
+        income_statement=to_engine_frame(snapshot.income_statement),
+        balance_sheet=to_engine_frame(snapshot.balance_sheet),
+        cash_flow=to_engine_frame(snapshot.cash_flow),
+        fast_info={
+            **snapshot.fast_info,
+            "shares_outstanding": snapshot.profile.get("shares_outstanding"),
+        },
     )
     result = ratio_engine.calculate(data)
-
     return {
         "roe": result.roe,
         "roce": result.roce,
@@ -167,18 +120,12 @@ def _build_ratio_payload(snapshot: CompanyFinancialSnapshot) -> dict[str, Any]:
 def _build_chart_data(snapshot: CompanyFinancialSnapshot) -> dict[str, pd.DataFrame]:
     return {
         "history": snapshot.history,
-        "revenue": _build_yearly_trend(
-            snapshot.income_statement,
-            ("TotalRevenue", "Revenue"),
-        ),
-        "net_income": _build_yearly_trend(
+        "revenue": build_yearly_trend(snapshot.income_statement, ("TotalRevenue", "Revenue")),
+        "net_income": build_yearly_trend(
             snapshot.income_statement,
             ("NetIncome", "Net Income", "PAT", "ProfitAfterTax"),
         ),
-        "free_cash_flow": _build_yearly_trend(
-            snapshot.cash_flow,
-            ("FreeCashFlow",),
-        ),
+        "free_cash_flow": build_yearly_trend(snapshot.cash_flow, ("FreeCashFlow",)),
     }
 
 
@@ -186,12 +133,10 @@ def _display_company_view(ticker: str) -> None:
     snapshot = _load_company_snapshot(ticker)
 
     st.subheader(f"Research Overview - {snapshot.ticker.upper()}")
-    summary = _build_summary_payload(snapshot)
-    render_summary_cards(summary)
+    render_summary_cards(_build_summary_payload(snapshot))
 
     st.divider()
-    ratios = _build_ratio_payload(snapshot)
-    render_ratio_cards(ratios)
+    render_ratio_cards(_build_ratio_payload(snapshot))
 
     st.divider()
     chart_data = _build_chart_data(snapshot)

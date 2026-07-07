@@ -7,69 +7,68 @@ import streamlit as st
 from athena.services.company_search_engine import CompanySearchEngine
 
 
-@st.cache_resource
+@st.cache_resource(show_spinner=False)
 def _get_company_search_engine() -> CompanySearchEngine:
+    """Build the search engine once and keep it cached across reruns."""
     engine = CompanySearchEngine()
     engine.load_company_master()
     return engine
 
 
-def _format_company_option(option: dict[str, str]) -> str:
-    return f"{option['company_name']}      {option['ticker']}"
+def _format_option(result: dict[str, str]) -> str:
+    sector = result.get("sector") or "Unknown"
+    return f"{result['ticker']}  \u2014  {result['company_name']}  \u00b7  {sector}"
 
 
-def _get_company_options() -> list[dict[str, str]]:
-    return [
-        company.as_dict()
-        for company in _get_company_search_engine().load_company_master()
-    ]
+def _resolve_selection(query: str, engine: CompanySearchEngine) -> dict[str, str] | None:
+    results = engine.search(query)
+    if not results:
+        st.warning("No matching companies found.")
+        return None
 
-
-def _get_selected_index(options: list[dict[str, str]], default_ticker: str) -> int:
-    selected_ticker = st.session_state.get("ticker", default_ticker)
-    normalized = str(selected_ticker or default_ticker).replace(".NS", "").upper()
-    for index, option in enumerate(options):
-        if option["ticker"].upper() == normalized:
-            return index
-    return 0
+    choice_index = st.selectbox(
+        "Matches",
+        options=range(len(results)),
+        format_func=lambda index: _format_option(results[index]),
+        key="company_choice",
+    )
+    return results[choice_index]
 
 
 def render_sidebar(default_ticker: str = "TCS") -> Tuple[str, bool]:
-    """Render the dashboard sidebar with cached company autocomplete."""
+    """Render the sidebar autocomplete and return the selected ticker."""
     with st.sidebar:
         st.header("ATHENA")
         st.caption("AI investment research workspace")
 
-        company_options = _get_company_options()
-        selected_company = st.selectbox(
-            "Company Search",
-            options=company_options,
-            index=_get_selected_index(company_options, default_ticker),
-            format_func=_format_company_option,
-            placeholder="Search by company or ticker",
+        engine = _get_company_search_engine()
+        query = st.text_input(
+            "Search company or ticker",
+            key="company_query",
+            placeholder="Search across all NSE companies (e.g. HDFC, TCS, waaree)",
         )
 
-        ticker = selected_company["ticker"] if selected_company else default_ticker
-        st.session_state["ticker"] = ticker.upper()
+        selected = _resolve_selection(query, engine) if query.strip() else None
 
-        if selected_company:
+        if selected:
+            ticker = selected["ticker"].upper()
+            st.session_state["ticker"] = ticker
             st.caption(
-                f"{selected_company.get('sector', 'Unknown sector')} - "
-                f"{selected_company.get('industry', 'Unknown industry')}"
+                f"**{selected['company_name']}**  \n"
+                f"{selected.get('sector', 'Unknown')} \u00b7 {selected.get('industry', 'Unknown')}"
             )
         else:
-            st.caption("Select a company to load research.")
-
-        theme_enabled = st.checkbox(
-            "Dark Mode",
-            value=bool(st.session_state.get("theme_enabled", True)),
-        )
-        st.session_state["theme_enabled"] = theme_enabled
+            ticker = str(st.session_state.get("ticker", default_ticker)).upper()
+            st.session_state["ticker"] = ticker
+            st.caption("Start typing to search across every NSE listed company.")
 
         st.divider()
         st.caption(
-            "Dashboard uses the service layer for data access and "
-            "the engine layer for ratios."
+            "Company data is served from a cached NSE master; financials load "
+            "once per company via the service layer."
         )
 
     return st.session_state["ticker"], False
+
+
+__all__ = ["render_sidebar"]

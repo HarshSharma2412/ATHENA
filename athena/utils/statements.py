@@ -99,6 +99,42 @@ def build_yearly_trend(frame: pd.DataFrame, aliases: tuple[str, ...]) -> pd.Data
     return trend.dropna(subset=["year", "value"]).sort_values("year")
 
 
+def _order_columns_by_period(frame: pd.DataFrame) -> pd.DataFrame:
+    """Order an engine-shaped frame's columns oldest to newest by period date."""
+    working = frame.copy()
+    parsed = pd.to_datetime(pd.Series(list(working.columns)), errors="coerce")
+    if parsed.notna().all():
+        ordered = [column for _, column in sorted(zip(parsed, working.columns))]
+        working = working.reindex(ordered, axis=1)
+    return working
+
+
+def metric_series(frame: pd.DataFrame | None, aliases: tuple[str, ...]) -> list[float]:
+    """Return an oldest-to-newest numeric series for the first matching line item.
+
+    Accepts either the service long-form frame (with a ``metric`` period column)
+    or an already engine-shaped frame (metrics as index). Non-numeric cells
+    collapse to ``0.0`` so downstream statistics never choke on sparse data.
+    """
+    if frame is None or frame.empty:
+        return []
+
+    engine_frame = to_engine_frame(frame) if "metric" in frame.columns else _order_columns_by_period(frame)
+    if engine_frame.empty:
+        return []
+
+    normalized_aliases = {normalize_label(alias) for alias in aliases}
+    for label in engine_frame.index:
+        if normalize_label(label) in normalized_aliases:
+            values = pd.to_numeric(engine_frame.loc[label], errors="coerce").fillna(0.0)
+            return [float(value) for value in values.tolist()]
+    for label in engine_frame.index:
+        if any(alias in normalize_label(label) for alias in normalized_aliases):
+            values = pd.to_numeric(engine_frame.loc[label], errors="coerce").fillna(0.0)
+            return [float(value) for value in values.tolist()]
+    return []
+
+
 def to_engine_frame(frame: pd.DataFrame) -> pd.DataFrame:
     """Reshape a service statement into a canonical, engine-friendly frame.
 
@@ -132,6 +168,7 @@ __all__ = [
     "build_yearly_trend",
     "latest_metric",
     "matching_column",
+    "metric_series",
     "normalize_label",
     "to_engine_frame",
 ]

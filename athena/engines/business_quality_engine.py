@@ -22,8 +22,6 @@ import logging
 from dataclasses import dataclass, field
 from typing import Optional, Sequence
 
-import pandas as pd
-
 from athena.engines.forecast_engine import ForecastEngine
 from athena.engines.ratio_engine import FinancialData, RatioResult
 from athena.models.business_quality_models import (
@@ -569,8 +567,8 @@ class BusinessQualityEngine:
             financial_data.cash_flow,
         )
 
-        net_income = self._statement_series(financial_data.income_statement, ("NetIncome", "netincome"))
-        operating_cash_flow = self._statement_series(
+        net_income = st.metric_series(financial_data.income_statement, ("NetIncome", "netincome"))
+        operating_cash_flow = st.metric_series(
             financial_data.cash_flow, ("OperatingCashFlow", "operatingcashflow")
         )
         revenue = history.revenue
@@ -587,42 +585,6 @@ class BusinessQualityEngine:
             working_capital_to_revenue=history.working_capital_to_revenue,
             capex_to_revenue=history.capex_to_revenue,
         )
-
-    @staticmethod
-    def _statement_series(frame: Optional[pd.DataFrame], aliases: tuple[str, ...]) -> list[float]:
-        """Return an oldest-to-newest numeric series for a statement line item.
-
-        Handles both the service long-form frame (with a ``metric`` period
-        column) and an already engine-shaped frame (metrics as index).
-        """
-        if frame is None or frame.empty:
-            return []
-
-        if "metric" in frame.columns:
-            engine_frame = st.to_engine_frame(frame)
-        else:
-            engine_frame = _order_columns_by_date(frame)
-
-        if engine_frame.empty:
-            return []
-
-        normalized = {st.normalize_label(alias) for alias in aliases}
-        for label in engine_frame.index:
-            if st.normalize_label(label) in normalized:
-                return [fm.to_float(value) or 0.0 for value in engine_frame.loc[label].tolist()]
-        for label in engine_frame.index:
-            if any(alias in st.normalize_label(label) for alias in normalized):
-                return [fm.to_float(value) or 0.0 for value in engine_frame.loc[label].tolist()]
-        return []
-
-
-def _order_columns_by_date(frame: pd.DataFrame) -> pd.DataFrame:
-    working = frame.copy()
-    parsed = pd.to_datetime(pd.Series(list(working.columns)), errors="coerce")
-    if parsed.notna().all():
-        ordered = [column for _, column in sorted(zip(parsed, working.columns))]
-        working = working.reindex(ordered, axis=1)
-    return working
 
 
 def _ratio_pairs(numerator: Sequence[float], denominator: Sequence[float]) -> list[float]:

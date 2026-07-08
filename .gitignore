@@ -18,3 +18,7 @@ env/
 .DS_Store
 .idea/
 .vscode/
+
+# Project artifacts / backups
+database.zip
+athena.db-journal

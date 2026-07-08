@@ -3,7 +3,7 @@
 The engine estimates every assumption from historical statements - the user
 never supplies growth, discount rate, terminal growth or any other input. Given
 a company's financials it returns a fully populated
-:class:`~athena.models.dcf_models.DCFResult` including scenario and sensitivity
+:class:`~athena.models.valuation_models.DCFResult` including scenario and sensitivity
 analysis and an investment recommendation.
 """
 
@@ -16,7 +16,7 @@ from typing import Any, Optional
 import pandas as pd
 
 from athena.engines.ratio_engine import RatioResult
-from athena.models.dcf_models import (
+from athena.models.valuation_models import (
     DCFResult,
     ForecastAssumptions,
     ForecastYear,
@@ -26,7 +26,7 @@ from athena.models.dcf_models import (
     ScenarioResult,
 )
 from athena.utils import finance_math as fm
-from athena.utils.forecast_engine import ForecastEngine
+from athena.engines.forecast_engine import ForecastEngine
 
 logger = logging.getLogger(__name__)
 

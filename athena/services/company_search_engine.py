@@ -1,3 +1,12 @@
+"""CSV-backed company autocomplete engine for the ATHENA dashboard.
+
+The engine loads ``athena/data/company_master.csv`` once into memory and serves
+fast, ranked autocomplete queries across every NSE listed company. Results are
+ranked by exact symbol, prefix, substring and fuzzy matches, and ties are broken
+by index membership and market-cap tier so that well-known large caps surface
+first.
+"""
+
 from __future__ import annotations
 
 import csv
@@ -6,7 +15,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar
 from urllib.error import URLError
-from urllib.request import Request, urlopen
 
 logger = logging.getLogger(__name__)
 
@@ -19,89 +27,69 @@ class CompanySearchResult:
     company_name: str
     sector: str
     industry: str
+    isin: str = ""
+    market_cap_category: str = "Unknown"
+    nifty50: bool = False
+    nifty_next50: bool = False
+    listing_status: str = "Listed"
+
+    @property
+    def symbol(self) -> str:
+        """Alias for :attr:`ticker` to match the master CSV schema."""
+        return self.ticker
 
     def as_dict(self) -> dict[str, str]:
         return {
             "ticker": self.ticker,
+            "symbol": self.ticker,
             "company_name": self.company_name,
             "sector": self.sector,
             "industry": self.industry,
+            "isin": self.isin,
+            "market_cap_category": self.market_cap_category,
+            "nifty50": "true" if self.nifty50 else "false",
+            "nifty_next50": "true" if self.nifty_next50 else "false",
+            "listing_status": self.listing_status,
         }
 
 
 class CompanySearchEngine:
-    """CSV-backed company autocomplete engine for fast in-memory search."""
+    """In-memory, ranked autocomplete over the NSE company master."""
 
-    NSE_EQUITY_URL: ClassVar[str] = (
-        "https://archives.nseindia.com/content/equities/EQUITY_L.csv"
-    )
-    REQUIRED_COLUMNS: ClassVar[set[str]] = {
-        "ticker",
-        "company_name",
-        "sector",
-        "industry",
+    RESULT_LIMIT: ClassVar[int] = 15
+
+    _CAP_ORDER: ClassVar[dict[str, int]] = {
+        "Large Cap": 0,
+        "Mid Cap": 1,
+        "Small Cap": 2,
+        "Micro Cap": 3,
+        "Unknown": 4,
     }
-    CSV_COLUMNS: ClassVar[list[str]] = [
-        "ticker",
-        "company_name",
-        "sector",
-        "industry",
-    ]
+
     FALLBACK_COMPANIES: ClassVar[tuple[CompanySearchResult, ...]] = (
         CompanySearchResult(
-            "HCLTECH",
-            "HCL Technologies Ltd",
-            "Information Technology",
-            "IT Services",
+            "HCLTECH", "HCL Technologies Ltd", "Information Technology",
+            "IT Services", "INE860A01027", "Large Cap", True, False,
         ),
         CompanySearchResult(
-            "HDFCBANK",
-            "HDFC Bank Ltd",
-            "Financial Services",
-            "Private Sector Bank",
+            "HDFCBANK", "HDFC Bank Ltd", "Financial Services",
+            "Private Sector Bank", "INE040A01034", "Large Cap", True, False,
         ),
         CompanySearchResult(
-            "HCG",
-            "HealthCare Global Enterprises Ltd",
-            "Healthcare",
-            "Hospital Services",
+            "HCG", "Healthcare Global Enterprises Ltd", "Healthcare",
+            "Hospital Services", "INE075I01017", "Micro Cap", False, False,
         ),
         CompanySearchResult(
-            "HCL-INSYS",
-            "HCL Infosystems Ltd",
-            "Information Technology",
-            "Technology Hardware",
+            "WAAREEENER", "Waaree Energies Ltd", "Capital Goods",
+            "Solar Equipment", "INE377N01017", "Mid Cap", False, False,
         ),
         CompanySearchResult(
-            "WAAREEENER",
-            "Waaree Energies Ltd",
-            "Capital Goods",
-            "Solar Equipment",
+            "TCS", "Tata Consultancy Services Ltd", "Information Technology",
+            "IT Services", "INE467B01029", "Large Cap", True, False,
         ),
         CompanySearchResult(
-            "TCS",
-            "Tata Consultancy Services Ltd",
-            "Information Technology",
-            "IT Services",
-        ),
-        CompanySearchResult("INFY", "Infosys Ltd", "Information Technology", "IT Services"),
-        CompanySearchResult(
-            "RELIANCE",
-            "Reliance Industries Ltd",
-            "Energy",
-            "Oil Gas and Consumable Fuels",
-        ),
-        CompanySearchResult(
-            "KPITTECH",
-            "KPIT Technologies Ltd",
-            "Information Technology",
-            "Software Services",
-        ),
-        CompanySearchResult(
-            "HAPPSTMNDS",
-            "Happiest Minds Technologies Ltd",
-            "Information Technology",
-            "Software Services",
+            "RELIANCE", "Reliance Industries Ltd", "Oil Gas & Consumable Fuels",
+            "Refineries", "INE002A01018", "Large Cap", True, False,
         ),
     )
 
@@ -109,130 +97,147 @@ class CompanySearchEngine:
         self._company_master_path = company_master_path or self._default_master_path()
         self._companies: list[CompanySearchResult] | None = None
 
+    # ------------------------------------------------------------------
+    # Loading
+    # ------------------------------------------------------------------
     def load_company_master(self) -> list[CompanySearchResult]:
-        """Load company master data once and return cached records."""
+        """Load and cache the company master, returning the same list instance."""
         if self._companies is not None:
             return self._companies
 
         if not self._company_master_path.exists():
-            self.build_company_master()
+            logger.info("Company master missing at %s; using fallback set", self._company_master_path)
+            self._companies = list(self.FALLBACK_COMPANIES)
+            return self._companies
 
         logger.info("Loading company master from %s", self._company_master_path)
-        with self._company_master_path.open("r", encoding="utf-8", newline="") as file:
-            reader = csv.DictReader(file)
-            self._validate_columns(reader.fieldnames)
+        with self._company_master_path.open("r", encoding="utf-8", newline="") as handle:
+            reader = csv.DictReader(handle)
             self._companies = [
-                CompanySearchResult(
-                    ticker=(row.get("ticker") or "").strip().upper(),
-                    company_name=(row.get("company_name") or "").strip(),
-                    sector=(row.get("sector") or "").strip(),
-                    industry=(row.get("industry") or "").strip(),
-                )
-                for row in reader
-                if (row.get("ticker") or "").strip()
-                and (row.get("company_name") or "").strip()
+                company
+                for company in (self._row_to_result(row) for row in reader)
+                if company is not None
             ]
+        if not self._companies:
+            logger.warning("Company master at %s was empty; using fallback", self._company_master_path)
+            self._companies = list(self.FALLBACK_COMPANIES)
         logger.info("Loaded %s company master records", len(self._companies))
         return self._companies
 
-    def build_company_master(self, force: bool = False) -> Path:
-        """Build and cache company_master.csv from NSE equity symbols."""
-        if self._company_master_path.exists() and not force:
-            return self._company_master_path
-
+    def refresh(self) -> list[CompanySearchResult]:
+        """Rebuild the master CSV from NSE sources and reload it into memory."""
         try:
-            companies = self._download_nse_equity_master()
-        except (OSError, URLError, TimeoutError, ValueError) as exc:
-            logger.warning("Unable to build company master from NSE: %s", exc)
-            companies = list(self.FALLBACK_COMPANIES)
+            from athena.scripts.update_company_master import build_company_master
 
-        self._company_master_path.parent.mkdir(parents=True, exist_ok=True)
-        with self._company_master_path.open("w", encoding="utf-8", newline="") as file:
-            writer = csv.DictWriter(file, fieldnames=self.CSV_COLUMNS)
-            writer.writeheader()
-            for company in companies:
-                writer.writerow(company.as_dict())
+            build_company_master(master_path=self._company_master_path)
+        except (OSError, URLError, TimeoutError, ValueError, ImportError) as exc:
+            logger.warning("Unable to refresh company master: %s", exc)
+        self._companies = None
+        return self.load_company_master()
 
-        self._companies = companies
-        logger.info("Cached %s companies at %s", len(companies), self._company_master_path)
-        return self._company_master_path
-
+    # ------------------------------------------------------------------
+    # Search API
+    # ------------------------------------------------------------------
     def search(self, query: str) -> list[dict[str, str]]:
-        """Return the top 15 company matches for a ticker or company query."""
+        """Return up to ``RESULT_LIMIT`` ranked matches for a ticker or name."""
+        return self._ranked_search(query, match_symbol=True, match_name=True)
+
+    def search_by_symbol(self, query: str) -> list[dict[str, str]]:
+        """Return ranked matches restricted to the company symbol/ticker."""
+        return self._ranked_search(query, match_symbol=True, match_name=False)
+
+    def search_by_company_name(self, query: str) -> list[dict[str, str]]:
+        """Return ranked matches restricted to the company name."""
+        return self._ranked_search(query, match_symbol=False, match_name=True)
+
+    def _ranked_search(
+        self,
+        query: str,
+        *,
+        match_symbol: bool,
+        match_name: bool,
+    ) -> list[dict[str, str]]:
         normalized_query = self._normalize(query)
         if not normalized_query:
             return []
 
-        ranked_matches: list[tuple[int, int, CompanySearchResult]] = []
-        for index, company in enumerate(self.load_company_master()):
-            rank = self._match_rank(company, normalized_query)
+        scored: list[tuple[int, tuple[int, int, int, str], CompanySearchResult]] = []
+        for company in self.load_company_master():
+            rank = self._match_rank(company, normalized_query, match_symbol, match_name)
             if rank is not None:
-                ranked_matches.append((rank, index, company))
+                scored.append((rank, self._popularity_key(company), company))
 
-        ranked_matches.sort(key=lambda item: (item[0], item[1]))
-        return [company.as_dict() for _, _, company in ranked_matches[:15]]
+        scored.sort(key=lambda item: (item[0], item[1]))
+        return [company.as_dict() for _, _, company in scored[: self.RESULT_LIMIT]]
 
     def _match_rank(
         self,
         company: CompanySearchResult,
-        normalized_query: str,
+        query: str,
+        match_symbol: bool,
+        match_name: bool,
     ) -> int | None:
-        ticker = self._normalize(company.ticker)
-        name = self._normalize(company.company_name)
+        symbol = self._normalize(company.ticker) if match_symbol else ""
+        name = self._normalize(company.company_name) if match_name else ""
         words = name.split()
 
-        if normalized_query in {ticker, name}:
+        if match_symbol and symbol == query:
             return 0
-        if ticker.startswith(normalized_query) or name.startswith(normalized_query):
+        if match_name and name == query:
             return 1
-        if any(word.startswith(normalized_query) for word in words):
-            return 1
-        if self._is_subsequence(normalized_query, ticker):
-            return 1
-        if normalized_query in ticker or normalized_query in name:
+        if (match_symbol and symbol.startswith(query)) or (
+            match_name and name.startswith(query)
+        ):
             return 2
+        if match_name and any(word.startswith(query) for word in words):
+            return 2
+        if (match_symbol and query in symbol) or (match_name and query in name):
+            return 3
+        if match_symbol and self._is_subsequence(query, symbol.replace(" ", "")):
+            return 3
+        if match_name and self._acronym(words).startswith(query):
+            return 4
         return None
 
-    def _validate_columns(self, fieldnames: list[str] | None) -> None:
-        columns = set(fieldnames or [])
-        missing_columns = self.REQUIRED_COLUMNS - columns
-        if missing_columns:
-            raise ValueError(
-                "company_master.csv is missing required columns: "
-                f"{', '.join(sorted(missing_columns))}"
-            )
-
-    def _download_nse_equity_master(self) -> list[CompanySearchResult]:
-        request = Request(
-            self.NSE_EQUITY_URL,
-            headers={
-                "User-Agent": "Mozilla/5.0 ATHENA Investment Research",
-                "Accept": "text/csv,*/*",
-            },
+    def _popularity_key(self, company: CompanySearchResult) -> tuple[int, int, int, str]:
+        return (
+            0 if company.nifty50 else 1,
+            0 if company.nifty_next50 else 1,
+            self._CAP_ORDER.get(company.market_cap_category, 4),
+            company.ticker,
         )
-        with urlopen(request, timeout=12) as response:
-            payload = response.read().decode("utf-8-sig")
 
-        reader = csv.DictReader(payload.splitlines())
-        companies = [
-            CompanySearchResult(
-                ticker=(row.get("SYMBOL") or "").strip().upper(),
-                company_name=(row.get("NAME OF COMPANY") or "").strip(),
-                sector=(row.get("SECTOR") or row.get("MACRO") or "Unknown").strip(),
-                industry=(row.get("INDUSTRY") or row.get("BASIC INDUSTRY") or "Unknown").strip(),
-            )
-            for row in reader
-            if (row.get("SYMBOL") or "").strip()
-            and (row.get("NAME OF COMPANY") or "").strip()
-            and (row.get("SERIES") or "EQ").strip().upper() == "EQ"
-        ]
-        if not companies:
-            raise ValueError("NSE equity master returned no EQ companies")
-        return companies
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+    def _row_to_result(self, row: dict[str, str]) -> CompanySearchResult | None:
+        symbol = (row.get("symbol") or row.get("ticker") or "").strip().upper()
+        name = (row.get("company_name") or "").strip()
+        if not symbol or not name:
+            return None
+        return CompanySearchResult(
+            ticker=symbol,
+            company_name=name,
+            sector=(row.get("sector") or "Unknown").strip() or "Unknown",
+            industry=(row.get("industry") or "Unknown").strip() or "Unknown",
+            isin=(row.get("isin") or "").strip(),
+            market_cap_category=(row.get("market_cap_category") or "Unknown").strip() or "Unknown",
+            nifty50=self._to_bool(row.get("nifty50")),
+            nifty_next50=self._to_bool(row.get("nifty_next50")),
+            listing_status=(row.get("listing_status") or "Listed").strip() or "Listed",
+        )
+
+    @staticmethod
+    def _to_bool(value: str | None) -> bool:
+        return str(value or "").strip().lower() in {"true", "1", "yes", "y"}
 
     @staticmethod
     def _normalize(value: str) -> str:
-        return " ".join(value.strip().casefold().split())
+        return " ".join(str(value).strip().casefold().split())
+
+    @staticmethod
+    def _acronym(words: list[str]) -> str:
+        return "".join(word[0] for word in words if word)
 
     @staticmethod
     def _is_subsequence(query: str, value: str) -> bool:
@@ -248,7 +253,7 @@ class CompanySearchEngine:
 
     @staticmethod
     def _default_master_path() -> Path:
-        return Path(__file__).resolve().parents[2] / "company_master.csv"
+        return Path(__file__).resolve().parents[1] / "data" / "company_master.csv"
 
 
 __all__ = ["CompanySearchEngine", "CompanySearchResult"]

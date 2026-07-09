@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "athena"
+version = "0.1.0"
+description = "ATHENA - AI-powered Equity Research Platform for long-term investors"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { file = "LICENSE" }
+dependencies = [
+    "SQLAlchemy>=2.0",
+    "pandas>=2.2",
+    "numpy>=1.26",
+    "streamlit>=1.36",
+    "plotly>=5.22",
+    "yfinance>=0.2.40",
+]
+
+[project.scripts]
+athena = "athena.app.dashboard:main"
+
+[tool.setuptools.packages.find]
+include = ["athena*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+explicit_package_bases = true
+exclude = ["athena/tests/"]
+
+[tool.pytest.ini_options]
+testpaths = ["athena/tests"]

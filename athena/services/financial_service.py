@@ -82,6 +82,22 @@ class FinancialService:
             logger.exception("Failed to fetch company profile for %s", symbol)
             return self._safe_error_payload(symbol, exc)
 
+    @staticmethod
+    def _extract_dividend_yield(info: Dict[str, Any]) -> Optional[float]:
+        """Return the dividend yield as a fraction (e.g. ``0.0123`` for 1.23%).
+
+        yfinance is inconsistent across versions: ``dividendYield`` is often a
+        percentage (e.g. ``5.55``) while ``trailingAnnualDividendYield`` is a
+        fraction (e.g. ``0.0503``). Values greater than 1 are treated as
+        percentages and normalised to a fraction.
+        """
+        for key in ("dividendYield", "trailingAnnualDividendYield"):
+            raw = info.get(key)
+            if not isinstance(raw, (int, float)) or raw <= 0:
+                continue
+            return raw / 100.0 if raw > 1 else float(raw)
+        return None
+
     def _get_company_profile_payload(self, symbol: str) -> Dict[str, Any]:
         stock = self._get_ticker(symbol)
         info = getattr(stock, "info", {}) or {}
@@ -91,6 +107,7 @@ class FinancialService:
             "industry": info.get("industry"),
             "market_cap": info.get("marketCap"),
             "shares_outstanding": info.get("sharesOutstanding"),
+            "dividend_yield": self._extract_dividend_yield(info),
             "business_summary": info.get("longBusinessSummary"),
             "website": info.get("website"),
             "country": info.get("country"),
